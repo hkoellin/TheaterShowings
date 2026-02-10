@@ -25,3 +25,42 @@ body {
     text-wrap: balance;
   }
 }
+
+/* Teams-style slide-in animation for detail panel */
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in-right 0.2s ease-out forwards;
+}
+
+/* Custom scrollbar for calendar columns */
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 2px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #374151;
+}
+
+/* Border-left width for calendar events */
+.border-l-3 {
+  border-left-width: 3px;
+}
