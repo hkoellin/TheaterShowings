@@ -63,12 +63,10 @@ function convertTo24Hour(time12h: string): string {
   const [time, modifier] = time12h.split(' ');
   let [hours, minutes] = time.split(':');
   
-  if (hours === '12') {
-    hours = '00';
-  }
-  
-  if (modifier === 'PM') {
+  if (modifier === 'PM' && hours !== '12') {
     hours = String(parseInt(hours, 10) + 12);
+  } else if (modifier === 'AM' && hours === '12') {
+    hours = '00';
   }
   
   return `${hours.padStart(2, '0')}:${minutes}`;
