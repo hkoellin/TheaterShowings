@@ -4,6 +4,7 @@ import { scrapeBAM } from './bam';
 import { scrapeLowCinema } from './lowcinema';
 import { scrapeIFC } from './ifc';
 import { scrapeFilmForum } from './filmforum';
+import { scrapeMock } from './mock';
 
 /**
  * Aggregates showtimes from all theater scrapers.
@@ -17,7 +18,9 @@ import { scrapeFilmForum } from './filmforum';
  */
 export async function getAllShowtimes(): Promise<Showtime[]> {
   // Run all scrapers concurrently
+  // Note: scrapeMock is included for demonstration purposes
   const results = await Promise.allSettled([
+    scrapeMock(),  // Mock data for demonstration
     scrapeMetrograph(),
     scrapeBAM(),
     scrapeLowCinema(),
@@ -29,7 +32,7 @@ export async function getAllShowtimes(): Promise<Showtime[]> {
   const allShowtimes: Showtime[] = [];
   
   results.forEach((result, index) => {
-    const theaterNames = ['Metrograph', 'BAM Rose Cinemas', 'Low Cinema', 'IFC Center', 'Film Forum'];
+    const theaterNames = ['Mock (Demo)', 'Metrograph', 'BAM Rose Cinemas', 'Low Cinema', 'IFC Center', 'Film Forum'];
     
     if (result.status === 'fulfilled') {
       allShowtimes.push(...result.value);
