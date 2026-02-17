@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'NYC Theater Showtimes',
-  description: 'Aggregated film showtimes from independent NYC theaters',
+  title: 'NYC Screenings',
+  description: 'Independent cinema showtimes across New York City',
 }
 
 export default function RootLayout({
@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en">
       <body>{children}</body>
     </html>
   )
