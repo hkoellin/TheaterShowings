@@ -1,15 +1,42 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Showtime, TheaterName, THEATERS } from '@/types/showtime';
-import WeekCalendar from '@/components/WeekCalendar';
+import DayStrip from '@/components/DayStrip';
+import TheaterTabs from '@/components/TheaterTabs';
+import EventCard from '@/components/EventCard';
+
+function formatDateISO(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatDayHeader(dateStr: string): string {
+  const date = new Date(dateStr + 'T00:00:00');
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayStr = formatDateISO(today);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = formatDateISO(tomorrow);
+
+  if (dateStr === todayStr) {
+    return 'Today · ' + date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  }
+  if (dateStr === tomorrowStr) {
+    return 'Tomorrow · ' + date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  }
+  return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+}
 
 export default function Home() {
   const [showtimes, setShowtimes] = useState<Showtime[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedTheaters, setSelectedTheaters] = useState<TheaterName[]>([...THEATERS]);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(() => formatDateISO(new Date()));
+  const [selectedTheater, setSelectedTheater] = useState<string>('all');
 
   useEffect(() => {
     fetchShowtimes();
@@ -30,157 +57,196 @@ export default function Home() {
     }
   };
 
-  const toggleTheater = (theater: TheaterName) => {
-    setSelectedTheaters(prev =>
-      prev.includes(theater)
-        ? prev.filter(t => t !== theater)
-        : [...prev, theater]
-    );
-  };
+  // All dates that have events
+  const daysWithEvents = useMemo(() => {
+    const days = new Set<string>();
+    for (const s of showtimes) {
+      days.add(s.date);
+    }
+    return days;
+  }, [showtimes]);
 
-  const theaterDotColors: Record<string, string> = {
-    'Metrograph': 'bg-blue-500',
-    'BAM Rose Cinemas': 'bg-purple-500',
-    'Low Cinema': 'bg-green-500',
-    'IFC Center': 'bg-red-500',
-    'Film Forum': 'bg-amber-500',
-  };
+  // Group showtimes by film+theater+date so a single card shows all times
+  const groupedShowtimes = useMemo(() => {
+    const dateFiltered = showtimes.filter(s => s.date === selectedDate);
+    const theaterFiltered = selectedTheater === 'all'
+      ? dateFiltered
+      : dateFiltered.filter(s => s.theater === selectedTheater);
+
+    // Group by film + theater
+    const map = new Map<string, Showtime>();
+    for (const s of theaterFiltered) {
+      const key = `${s.film}|||${s.theater}`;
+      if (!map.has(key)) {
+        map.set(key, { ...s, allTimes: [s.time] });
+      } else {
+        const existing = map.get(key)!;
+        if (!existing.allTimes) existing.allTimes = [existing.time];
+        if (!existing.allTimes.includes(s.time)) {
+          existing.allTimes.push(s.time);
+        }
+        // Keep higher popularity
+        if (s.popularity !== undefined) {
+          existing.popularity = Math.max(existing.popularity || 0, s.popularity);
+        }
+      }
+    }
+
+    // Sort: popularity (desc), then alphabetical
+    const results = Array.from(map.values());
+    results.sort((a, b) => {
+      const pa = a.popularity ?? -1;
+      const pb = b.popularity ?? -1;
+      if (pb !== pa) return pb - pa;
+      return a.film.localeCompare(b.film);
+    });
+
+    return results;
+  }, [showtimes, selectedDate, selectedTheater]);
+
+  // Theater counts for selected date
+  const theaterCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    const dateFiltered = showtimes.filter(s => s.date === selectedDate);
+
+    // Count unique films per theater
+    for (const theater of THEATERS) {
+      const films = new Set(dateFiltered.filter(s => s.theater === theater).map(s => s.film));
+      counts[theater] = films.size;
+    }
+    return counts;
+  }, [showtimes, selectedDate]);
 
   return (
-    <div className="h-screen flex flex-col bg-white dark:bg-gray-900">
-      {/* Top Bar — Teams-style */}
-      <header className="flex items-center justify-between px-4 py-2 bg-[#ebebeb] dark:bg-[#1f1f1f] border-b border-gray-300 dark:border-gray-700">
-        <div className="flex items-center gap-3">
-          {/* Hamburger for mobile theater filter */}
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="lg:hidden p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
-            aria-label="Toggle filters"
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-            </svg>
-          </button>
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🎬</span>
-            <h1 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-              NYC Theater Showtimes
-            </h1>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            onClick={fetchShowtimes}
-            disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
-          >
-            <svg className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182" />
-            </svg>
-            Refresh
-          </button>
-        </div>
-      </header>
-
-      <div className="flex flex-1 min-h-0">
-        {/* Sidebar — Theater Filter */}
-        <aside className={`
-          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-          lg:translate-x-0 
-          fixed lg:static inset-y-0 left-0 z-30
-          w-56 bg-[#f5f5f5] dark:bg-[#181818] border-r border-gray-200 dark:border-gray-700
-          transition-transform duration-200 ease-in-out
-          flex flex-col
-        `}>
-          {/* Mobile close */}
-          <div className="flex items-center justify-between px-4 pt-3 pb-1 lg:hidden">
-            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Filters</span>
-            <button onClick={() => setSidebarOpen(false)} className="p-1 text-gray-500 hover:text-gray-700">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    <div className="min-h-screen bg-[#f5f0e8] text-gray-900">
+      {/* Header */}
+      <header className="sticky top-0 z-40 bg-[#f5f0e8]/90 backdrop-blur-xl border-b border-gray-200">
+        <div className="max-w-4xl mx-auto px-4">
+          {/* Top bar */}
+          <div className="flex items-center justify-between py-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-gray-900 flex items-center justify-center">
+                <span className="text-lg">🎬</span>
+              </div>
+              <div>
+                <h1 className="text-[17px] font-bold tracking-tight text-gray-900">NYC Screenings</h1>
+                <p className="text-[12px] text-gray-500">Independent cinema showtimes</p>
+              </div>
+            </div>
+            <button
+              onClick={fetchShowtimes}
+              disabled={loading}
+              className="flex items-center gap-2 px-3.5 py-2 text-[13px] font-medium rounded-lg bg-white hover:bg-gray-100 border border-gray-200 text-gray-700 transition-all disabled:opacity-50"
+            >
+              <svg className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182" />
               </svg>
+              Refresh
             </button>
           </div>
 
-          <div className="px-4 py-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-3">
-              Theaters
-            </h3>
-            <div className="space-y-1">
-              {THEATERS.map((theater) => (
-                <label
-                  key={theater}
-                  className="flex items-center gap-2.5 px-2 py-1.5 rounded-md cursor-pointer hover:bg-gray-200/70 dark:hover:bg-gray-700/50 transition-colors"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedTheaters.includes(theater)}
-                    onChange={() => toggleTheater(theater)}
-                    className="w-3.5 h-3.5 rounded text-blue-600 border-gray-300 dark:border-gray-600 focus:ring-blue-500 focus:ring-1"
-                  />
-                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${theaterDotColors[theater] || 'bg-gray-500'}`} />
-                  <span className="text-sm text-gray-700 dark:text-gray-300 truncate">
-                    {theater}
-                  </span>
-                </label>
-              ))}
-            </div>
+          {/* Day strip */}
+          <div className="py-2">
+            <DayStrip
+              selectedDate={selectedDate}
+              onDateChange={setSelectedDate}
+              daysWithEvents={daysWithEvents}
+            />
           </div>
+        </div>
+      </header>
 
-          <div className="px-4 pt-2 pb-3 border-t border-gray-200 dark:border-gray-700 mt-auto">
-            <div className="text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed">
-              Showing {showtimes.length} total showtime{showtimes.length !== 1 ? 's' : ''} from {THEATERS.length} theaters
-            </div>
-          </div>
-        </aside>
-
-        {/* Mobile Sidebar Backdrop */}
-        {sidebarOpen && (
-          <div
-            className="fixed inset-0 bg-black/20 z-20 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
+      {/* Main content */}
+      <main className="max-w-4xl mx-auto px-4 py-6">
+        {/* Day heading + theater tabs */}
+        <div className="mb-6">
+          <h2 className="text-2xl font-bold mb-4 text-gray-900 tracking-tight">
+            {formatDayHeader(selectedDate)}
+          </h2>
+          <TheaterTabs
+            selectedTheater={selectedTheater}
+            onTabChange={setSelectedTheater}
+            theaterCounts={theaterCounts}
           />
+        </div>
+
+        {/* Loading state */}
+        {loading && (
+          <div className="flex flex-col items-center justify-center py-24">
+            <div className="animate-spin rounded-full h-10 w-10 border-2 border-gray-900 border-t-transparent" />
+            <span className="text-sm text-gray-500 mt-4">Loading showtimes...</span>
+          </div>
         )}
 
-        {/* Main Calendar Area */}
-        <main className="flex-1 flex flex-col min-h-0 min-w-0">
-          {loading && (
-            <div className="flex-1 flex items-center justify-center">
-              <div className="flex flex-col items-center gap-3">
-                <div className="animate-spin rounded-full h-8 w-8 border-2 border-blue-600 border-t-transparent" />
-                <span className="text-sm text-gray-500 dark:text-gray-400">Loading showtimes...</span>
-              </div>
+        {/* Error state */}
+        {error && !loading && (
+          <div className="flex flex-col items-center justify-center py-24">
+            <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mb-4">
+              <svg className="w-8 h-8 text-red-400" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+              </svg>
             </div>
-          )}
+            <p className="text-sm font-medium text-gray-700 mb-2">{error}</p>
+            <button
+              onClick={fetchShowtimes}
+              className="text-sm text-red-600 hover:text-red-500 transition-colors"
+            >
+              Try again
+            </button>
+          </div>
+        )}
 
-          {error && !loading && (
-            <div className="flex-1 flex items-center justify-center p-8">
-              <div className="text-center">
-                <div className="text-red-500 mb-2">
-                  <svg className="w-10 h-10 mx-auto" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+        {/* Event list */}
+        {!loading && !error && (
+          <>
+            {groupedShowtimes.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-24">
+                <div className="w-16 h-16 rounded-2xl bg-gray-200 flex items-center justify-center mb-4">
+                  <svg className="w-8 h-8 text-gray-400" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 01-1.125-1.125M3.375 19.5h1.5C5.496 19.5 6 18.996 6 18.375m-2.625 0V5.625m0 0A1.125 1.125 0 014.5 4.5h15a1.125 1.125 0 011.125 1.125v12.75M3.375 19.5h17.25m0 0a1.125 1.125 0 001.125-1.125M20.625 19.5h-1.5A1.875 1.875 0 0117.25 17.625V5.625m3.375 0v12.75" />
                   </svg>
                 </div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{error}</p>
-                <button
-                  onClick={fetchShowtimes}
-                  className="mt-3 text-sm text-blue-600 dark:text-blue-400 hover:underline"
-                >
-                  Try again
-                </button>
+                <p className="text-sm text-gray-500">No screenings on this date</p>
+                <p className="text-xs text-gray-400 mt-1">Try selecting another day</p>
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="space-y-3">
+                {/* Results count */}
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-[13px] text-gray-500 uppercase tracking-wider font-semibold">
+                    {groupedShowtimes.length} screening{groupedShowtimes.length !== 1 ? 's' : ''}
+                  </p>
+                  {groupedShowtimes.some(s => s.popularity !== undefined) && (
+                    <p className="text-[10px] text-gray-400 uppercase tracking-wider">
+                      Sorted by demand
+                    </p>
+                  )}
+                </div>
 
-          {!loading && !error && (
-            <WeekCalendar
-              showtimes={showtimes}
-              selectedTheaters={selectedTheaters}
-            />
-          )}
-        </main>
-      </div>
+                {groupedShowtimes.map((showtime, i) => (
+                  <EventCard
+                    key={showtime.id}
+                    showtime={showtime}
+                    rank={i + 1}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-gray-200 mt-12">
+        <div className="max-w-4xl mx-auto px-4 py-6 flex items-center justify-between">
+          <p className="text-xs text-gray-400">
+            NYC Screenings — Independent cinema showtimes
+          </p>
+          <p className="text-[10px] text-gray-400">
+            {showtimes.length} total showtime{showtimes.length !== 1 ? 's' : ''} from {THEATERS.length} theaters
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
