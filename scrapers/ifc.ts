@@ -50,14 +50,14 @@ export async function scrapeIFC(): Promise<Showtime[]> {
             titleLink.attr('href') || 'https://www.ifccenter.com';
 
           // Extract image URL if available
-          const imageUrl = $film.find('img').first().attr('src') || undefined;
+          const imageUrl = $film.find('img').first().attr('src');
 
           // Extract description if available
-          const description = $film.find('p, .description, .synopsis').first().text().trim() || undefined;
+          const description = $film.find('p, .description, .synopsis').first().text().trim();
 
           // Collect all showtimes and create Showtime entries in a single loop
           const allTimes: string[] = [];
-          const timeEntries: Array<{ time: string; ticketUrl: string }> = [];
+          const timeEntries: { time: string; ticketUrl: string }[] = [];
 
           $film.find('ul.times li a').each((_, timeEl) => {
             const $t = $(timeEl);
@@ -77,7 +77,7 @@ export async function scrapeIFC(): Promise<Showtime[]> {
             showtimes.push({
               id: `ifc-${film}-${isoDate}-${time}`
                 .replace(/\s+/g, '-')
-                .replace(/[^a-z0-9\-]/gi, '')
+                .replace(/[^a-z0-9-]/gi, '')
                 .toLowerCase(),
               film,
               theater: 'IFC Center',
