@@ -3,22 +3,21 @@ import * as cheerio from 'cheerio';
 
 /**
  * Scraper for IFC Center (https://www.ifccenter.com)
- * 
- * This scraper fetches the IFC Center showtimes and extracts:
- * - Film titles from movie listings
- * - Showtimes for each film
- * - Ticket purchase links
- * - Film posters and descriptions
- * 
- * Note: IFC Center's structure may change. Monitor and update selectors as needed.
+ *
+ * The homepage contains server-rendered daily schedule blocks:
+ *   div.daily-schedule.{day} (e.g. "daily-schedule wed active")
+ *     h3 → "Wed Feb 18" (date header)
+ *     ul > li > div.details
+ *       h3 > a[href] → film title & link
+ *       ul.times > li > a[href] → showtime text & ticket URL
  */
 export async function scrapeIFC(): Promise<Showtime[]> {
   try {
-    const url = 'https://www.ifccenter.com';
-    const response = await fetch(url, {
+    const response = await fetch('https://www.ifccenter.com', {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
     });
 
     if (!response.ok) {
@@ -30,55 +29,62 @@ export async function scrapeIFC(): Promise<Showtime[]> {
     const $ = cheerio.load(html);
     const showtimes: Showtime[] = [];
 
-    // IFC typically has a grid of current films with showtime buttons
-    $('.film, .movie, .showing, article').each((_, element) => {
-      try {
-        const $el = $(element);
-        
-        // Extract film title
-        const film = $el.find('h2, h3, .title, .film-title, .movie-title').first().text().trim();
-        if (!film) return;
+    // Each .daily-schedule block represents one day
+    $('.daily-schedule').each((_, dayEl) => {
+      const $day = $(dayEl);
 
-        // Extract image
-        const imageUrl = $el.find('img').first().attr('src') || 
-                        $el.find('img').first().attr('data-src');
+      // Date header: "Wed Feb 18", "Thu Feb 19", etc.
+      const dateHeaderText = $day.find('> h3').first().text().trim();
+      const isoDate = parseDateHeader(dateHeaderText);
+      if (!isoDate) return;
 
-        // Extract description
-        const description = $el.find('p, .description, .synopsis').first().text().trim();
+      // Each div.details is one film entry
+      $day.find('div.details').each((_, filmEl) => {
+        try {
+          const $film = $(filmEl);
+          const titleLink = $film.find('h3 a').first();
+          const film = titleLink.text().trim();
+          if (!film) return;
 
-        // Extract showtimes - IFC often has time buttons
-        $el.find('.showtime, .time-button, time, button, a[href*="ticket"]').each((_, timeEl) => {
-          const $time = $(timeEl);
-          const timeText = $time.text().trim();
-          const ticketUrl = $time.attr('href') || $time.closest('a').attr('href') || url;
+          const filmUrl =
+            titleLink.attr('href') || 'https://www.ifccenter.com';
 
-          // Parse date and time
-          const dateMatch = timeText.match(/(\d{1,2})\/(\d{1,2})/);
-          const timeMatch = timeText.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+          // Collect all showtimes for this film on this date
+          const allTimes: string[] = [];
+          $film.find('ul.times li a').each((_, timeEl) => {
+            const raw = $(timeEl).text().trim();
+            const match = raw.match(/(\d{1,2}:\d{2}\s*[AP]M)/i);
+            if (match) allTimes.push(match[1].toUpperCase());
+          });
 
-          if (timeMatch) {
-            const today = new Date();
-            const date = dateMatch 
-              ? `${today.getFullYear()}-${dateMatch[1].padStart(2, '0')}-${dateMatch[2].padStart(2, '0')}`
-              : today.toISOString().split('T')[0];
-            
-            const time = `${timeMatch[1]}:${timeMatch[2]} ${timeMatch[3].toUpperCase()}`;
+          // Create a Showtime entry per individual time
+          $film.find('ul.times li a').each((_, timeEl) => {
+            const $t = $(timeEl);
+            const raw = $t.text().trim();
+            const match = raw.match(/(\d{1,2}:\d{2}\s*[AP]M)/i);
+            if (!match) return;
+
+            const time = match[1].toUpperCase();
+            const ticketUrl = $t.attr('href') || filmUrl;
 
             showtimes.push({
-              id: `ifc-${film}-${date}-${time}`.replace(/\s/g, '-').toLowerCase(),
+              id: `ifc-${film}-${isoDate}-${time}`
+                .replace(/\s+/g, '-')
+                .toLowerCase(),
               film,
               theater: 'IFC Center',
-              date,
+              date: isoDate,
               time,
-              ticketUrl: ticketUrl.startsWith('http') ? ticketUrl : `https://www.ifccenter.com${ticketUrl}`,
-              imageUrl,
-              description
+              ticketUrl: ticketUrl.startsWith('http')
+                ? ticketUrl
+                : `https://www.ifccenter.com${ticketUrl}`,
+              allTimes,
             });
-          }
-        });
-      } catch (err) {
-        console.error('IFC: Error parsing film', err);
-      }
+          });
+        } catch (err) {
+          console.error('IFC: Error parsing film entry', err);
+        }
+      });
     });
 
     return showtimes;
@@ -86,4 +92,38 @@ export async function scrapeIFC(): Promise<Showtime[]> {
     console.error('IFC scraper error:', error);
     return [];
   }
+}
+
+/**
+ * Parse "Wed Feb 18" style date headers into ISO date strings.
+ * Assumes the current year; handles Dec→Jan year rollover.
+ */
+function parseDateHeader(text: string): string | null {
+  const months: Record<string, number> = {
+    Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+    Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+  };
+
+  const match = text.match(
+    /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})/i,
+  );
+  if (!match) return null;
+
+  const monthName = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+  const monthIdx = months[monthName];
+  if (monthIdx === undefined) return null;
+  const day = parseInt(match[2], 10);
+
+  const now = new Date();
+  let year = now.getFullYear();
+
+  // If the date appears to be far in the past, assume next year
+  const candidate = new Date(year, monthIdx, day);
+  if (candidate.getTime() < now.getTime() - 30 * 24 * 60 * 60 * 1000) {
+    year += 1;
+  }
+
+  const mm = String(monthIdx + 1).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  return `${year}-${mm}-${dd}`;
 }
