@@ -51,23 +51,23 @@ export default function DayStrip({ selectedDate, onDateChange, daysWithEvents }:
             className={`
               flex flex-col items-center min-w-[4.5rem] px-3 py-2.5 rounded-xl transition-all duration-150 shrink-0
               ${isSelected
-                ? 'bg-gray-900 text-white shadow-md'
-                : 'text-gray-500 hover:bg-white hover:text-gray-800 hover:shadow-sm'
+                ? 'bg-red-700 text-white shadow-md'
+                : 'bg-red-50/60 text-gray-500 hover:bg-red-100 hover:text-gray-800 hover:shadow-sm'
               }
             `}
           >
             <span className={`text-[11px] font-semibold uppercase tracking-wider ${
-              isSelected ? 'text-white/70' : 'text-gray-400'
+              isSelected ? 'text-red-100' : 'text-gray-400'
             }`}>
               {day.dayName}
             </span>
             <span className={`text-xl font-bold mt-0.5 ${
-              isSelected ? 'text-white' : 'text-gray-700'
+              isSelected ? 'text-white' : 'text-gray-800'
             }`}>
               {day.dayNum}
             </span>
             <span className={`text-[10px] uppercase tracking-wide ${
-              isSelected ? 'text-white/70' : 'text-gray-400'
+              isSelected ? 'text-red-100' : 'text-gray-400'
             }`}>
               {day.monthName}
             </span>

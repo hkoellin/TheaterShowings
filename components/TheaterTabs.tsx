@@ -30,15 +30,15 @@ export default function TheaterTabs({ selectedTheater, onTabChange, theaterCount
             className={`
               flex items-center gap-2 px-4 py-2 rounded-full text-[13px] font-semibold transition-all duration-150 shrink-0 whitespace-nowrap
               ${isSelected
-                ? 'bg-gray-900 text-white'
-                : 'bg-white text-gray-600 hover:bg-gray-100 hover:text-gray-900 border border-gray-200'
+                ? 'bg-red-700 text-white'
+                : 'bg-red-50/60 text-gray-600 hover:bg-red-100 hover:text-gray-900 border border-red-200/50'
               }
             `}
           >
 
             <span>{tab === 'all' ? 'All Venues' : tab}</span>
             <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-              isSelected ? 'bg-black/10' : 'bg-white/5'
+              isSelected ? 'bg-red-900/20' : 'bg-red-100/50'
             }`}>
               {count}
             </span>
