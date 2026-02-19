@@ -49,15 +49,16 @@ export async function scrapeIFC(): Promise<Showtime[]> {
           const filmUrl =
             titleLink.attr('href') || 'https://www.ifccenter.com';
 
-          // Collect all showtimes for this film on this date
-          const allTimes: string[] = [];
-          $film.find('ul.times li a').each((_, timeEl) => {
-            const raw = $(timeEl).text().trim();
-            const match = raw.match(/(\d{1,2}:\d{2}\s*[AP]M)/i);
-            if (match) allTimes.push(match[1].toUpperCase());
-          });
+          // Extract image URL if available
+          const imageUrl = $film.find('img').first().attr('src') || undefined;
 
-          // Create a Showtime entry per individual time
+          // Extract description if available
+          const description = $film.find('p, .description, .synopsis').first().text().trim() || undefined;
+
+          // Collect all showtimes and create Showtime entries in a single loop
+          const allTimes: string[] = [];
+          const timeEntries: Array<{ time: string; ticketUrl: string }> = [];
+
           $film.find('ul.times li a').each((_, timeEl) => {
             const $t = $(timeEl);
             const raw = $t.text().trim();
@@ -65,11 +66,18 @@ export async function scrapeIFC(): Promise<Showtime[]> {
             if (!match) return;
 
             const time = match[1].toUpperCase();
-            const ticketUrl = $t.attr('href') || filmUrl;
+            allTimes.push(time);
 
+            const ticketUrl = $t.attr('href') || filmUrl;
+            timeEntries.push({ time, ticketUrl });
+          });
+
+          // Create a Showtime entry per individual time
+          timeEntries.forEach(({ time, ticketUrl }) => {
             showtimes.push({
               id: `ifc-${film}-${isoDate}-${time}`
                 .replace(/\s+/g, '-')
+                .replace(/[^a-z0-9\-]/gi, '')
                 .toLowerCase(),
               film,
               theater: 'IFC Center',
@@ -79,6 +87,8 @@ export async function scrapeIFC(): Promise<Showtime[]> {
                 ? ticketUrl
                 : `https://www.ifccenter.com${ticketUrl}`,
               allTimes,
+              imageUrl,
+              description,
             });
           });
         } catch (err) {
@@ -116,11 +126,18 @@ function parseDateHeader(text: string): string | null {
 
   const now = new Date();
   let year = now.getFullYear();
+  const nowMonth = now.getMonth();
 
-  // If the date appears to be far in the past, assume next year
-  const candidate = new Date(year, monthIdx, day);
-  if (candidate.getTime() < now.getTime() - 30 * 24 * 60 * 60 * 1000) {
-    year += 1;
+  // Handle Dec dates viewed from Jan/Feb as belonging to the previous year,
+  // otherwise, if the date appears to be far in the past, assume next year.
+  if (monthIdx === 11 && (nowMonth === 0 || nowMonth === 1)) {
+    // We're in Jan/Feb looking at a Dec date → treat as last year's December.
+    year -= 1;
+  } else {
+    const candidate = new Date(year, monthIdx, day);
+    if (candidate.getTime() < now.getTime() - 30 * 24 * 60 * 60 * 1000) {
+      year += 1;
+    }
   }
 
   const mm = String(monthIdx + 1).padStart(2, '0');
