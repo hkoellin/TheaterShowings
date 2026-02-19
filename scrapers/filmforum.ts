@@ -46,6 +46,10 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
         // Extract description
         const description = $el.find('p, .description, .synopsis').first().text().trim();
 
+        // Collect all showtimes and create Showtime entries
+        const timeEntries: { date: string; time: string; ticketUrl: string }[] = [];
+        const allTimesByDate: Record<string, string[]> = {};
+
         // Extract showtimes
         $el.find('.showtime, .time, time, a[href*="ticket"], a[href*="show"]').each((_, timeEl) => {
           const $time = $(timeEl);
@@ -57,24 +61,35 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
           const timeMatch = timeText.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
 
           if (timeMatch) {
-            const today = new Date();
-            const date = dateMatch 
-              ? `${today.getFullYear()}-${dateMatch[1].padStart(2, '0')}-${dateMatch[2].padStart(2, '0')}`
-              : today.toISOString().split('T')[0];
-            
+            const date = parseDateFromMatch(dateMatch);
             const time = `${timeMatch[1]}:${timeMatch[2]} ${timeMatch[3].toUpperCase()}`;
 
-            showtimes.push({
-              id: `filmforum-${film}-${date}-${time}`.replace(/\s/g, '-').toLowerCase(),
-              film,
-              theater: 'Film Forum',
-              date,
-              time,
-              ticketUrl: ticketUrl.startsWith('http') ? ticketUrl : `https://filmforum.org${ticketUrl}`,
-              imageUrl,
-              description
-            });
+            // Track all times for this date
+            if (!allTimesByDate[date]) {
+              allTimesByDate[date] = [];
+            }
+            allTimesByDate[date].push(time);
+
+            timeEntries.push({ date, time, ticketUrl });
           }
+        });
+
+        // Create Showtime entries
+        timeEntries.forEach(({ date, time, ticketUrl }) => {
+          showtimes.push({
+            id: `filmforum-${film}-${date}-${time}`
+              .replace(/\s+/g, '-')
+              .replace(/[^a-z0-9-]/gi, '')
+              .toLowerCase(),
+            film,
+            theater: 'Film Forum',
+            date,
+            time,
+            ticketUrl: ticketUrl.startsWith('http') ? ticketUrl : `https://filmforum.org${ticketUrl}`,
+            allTimes: allTimesByDate[date],
+            imageUrl,
+            description
+          });
         });
       } catch (err) {
         console.error('Film Forum: Error parsing film', err);
@@ -86,4 +101,39 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
     console.error('Film Forum scraper error:', error);
     return [];
   }
+}
+
+/**
+ * Parse date from MM/DD format match with proper year rollover handling.
+ * Handles December dates viewed in Jan/Feb correctly.
+ */
+function parseDateFromMatch(dateMatch: RegExpMatchArray | null): string {
+  const now = new Date();
+  let year = now.getFullYear();
+  const nowMonth = now.getMonth();
+  
+  if (dateMatch) {
+    const month = parseInt(dateMatch[1], 10);
+    const day = parseInt(dateMatch[2], 10);
+    const monthIdx = month - 1; // Convert to 0-indexed
+
+    // Handle Dec dates viewed from Jan/Feb as belonging to the previous year,
+    // otherwise, if the date appears to be far in the past, assume next year.
+    if (monthIdx === 11 && (nowMonth === 0 || nowMonth === 1)) {
+      // We're in Jan/Feb looking at a Dec date → treat as last year's December.
+      year -= 1;
+    } else {
+      const candidate = new Date(year, monthIdx, day);
+      if (candidate.getTime() < now.getTime() - 30 * 24 * 60 * 60 * 1000) {
+        year += 1;
+      }
+    }
+
+    const mm = String(month).padStart(2, '0');
+    const dd = String(day).padStart(2, '0');
+    return `${year}-${mm}-${dd}`;
+  }
+  
+  // No date match, use today
+  return now.toISOString().split('T')[0];
 }
