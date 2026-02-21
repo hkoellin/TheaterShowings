@@ -3,6 +3,7 @@ import * as cheerio from 'cheerio';
 
 const BASE_URL = 'https://filmforum.org';
 const NOW_PLAYING_URL = `${BASE_URL}/now_playing`;
+const HOMEPAGE_URL = BASE_URL;
 
 const HEADERS = {
   'User-Agent':
@@ -13,6 +14,12 @@ const HEADERS = {
 
 /** 30-day threshold for rolling past dates to next year. */
 const PAST_DATE_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Day-of-week abbreviations → 0-based index */
+const DOW_MAP: Record<string, number> = {
+  sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+  sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+};
 
 /** Resolve a possibly-relative href to an absolute URL. */
 function toAbsoluteUrl(href: string): string {
@@ -25,49 +32,67 @@ function toCanonicalUrl(url: string): string {
 }
 
 /**
- * Scraper for Film Forum (https://filmforum.org/now_playing)
+ * Scraper for Film Forum (https://filmforum.org)
  *
- * Strategy:
- *   Stage 1 – Parse the now_playing page directly for film blocks.
- *   Stage 2 – If no showtimes are found on the index page, follow each film's
- *             detail URL to extract date-range information.
+ * The Film Forum homepage contains a "Playing This Week" schedule box that
+ * lists each day of the week with all films and their actual showtimes.
+ * This is the most data-rich source since it contains real times (not just
+ * date ranges) and covers the whole current week.
  *
- * The scraper tries multiple CSS selector strategies to handle site redesigns.
+ * Strategy (in priority order):
+ *   1. Homepage – parse the "playing this week" day-organized schedule box.
+ *   2. /now_playing page – try film blocks (div.film) with embedded times.
+ *   3. /now_playing page – follow /film/ or /tickets/ detail URLs for date ranges.
+ *
+ * If nothing works, log diagnostics (HTML preview, links, class names) so
+ * the correct selectors can be identified.
  */
 export async function scrapeFilmForum(): Promise<Showtime[]> {
+  // ----------------------------------------------------------------
+  // ATTEMPT 1: Homepage "playing this week" schedule
+  // ----------------------------------------------------------------
+  try {
+    const homeRes = await fetch(HOMEPAGE_URL, { headers: HEADERS });
+    if (homeRes.ok) {
+      const homeHtml = await homeRes.text();
+      console.log(`Film Forum: Fetched homepage (${homeHtml.length} bytes)`);
+      const $home = cheerio.load(homeHtml);
+      const homeShowtimes = extractWeekSchedule($home, homeHtml);
+      if (homeShowtimes.length > 0) {
+        console.log(`Film Forum: Found ${homeShowtimes.length} showtimes (homepage week-schedule strategy)`);
+        return homeShowtimes;
+      }
+      console.log('Film Forum: Homepage week-schedule strategy found 0 showtimes');
+    }
+  } catch (err) {
+    console.error('Film Forum: Homepage fetch failed:', err);
+  }
+
+  // ----------------------------------------------------------------
+  // ATTEMPT 2 & 3: /now_playing page
+  // ----------------------------------------------------------------
   try {
     const response = await fetch(NOW_PLAYING_URL, { headers: HEADERS });
-
     if (!response.ok) {
-      console.error(`Film Forum: HTTP ${response.status}`);
+      console.error(`Film Forum: HTTP ${response.status} on now_playing`);
       return [];
     }
 
     const html = await response.text();
     console.log(`Film Forum: Fetched now_playing page (${html.length} bytes)`);
-
     const $ = cheerio.load(html);
 
-    // ----------------------------------------------------------------
-    // STAGE 1: Try to extract film data directly from the now_playing page.
-    // Film Forum's current site wraps each film in a div.film block with
-    // showtimes and a ticket link embedded.
-    // ----------------------------------------------------------------
-    const showtimes = extractFromIndexPage($, html);
-    if (showtimes.length > 0) {
-      console.log(`Film Forum: Found ${showtimes.length} showtimes (index-page strategy)`);
-      return showtimes;
+    // Attempt 2: film blocks with embedded showtimes
+    const indexShowtimes = extractFromIndexPage($, html);
+    if (indexShowtimes.length > 0) {
+      console.log(`Film Forum: Found ${indexShowtimes.length} showtimes (index film-block strategy)`);
+      return indexShowtimes;
     }
 
-    // ----------------------------------------------------------------
-    // STAGE 2: Collect film detail page URLs and scrape each one.
-    // Film detail URLs contain "/film/" or "/tickets/".
-    // ----------------------------------------------------------------
+    // Attempt 3: follow film detail URLs
     const filmUrls = collectFilmUrls($);
     console.log(`Film Forum: Found ${filmUrls.size} film URLs for detail scraping`);
-
     if (filmUrls.size === 0) {
-      // Log diagnostic info to help debug the HTML structure
       logDiagnostics($, html);
       return [];
     }
@@ -83,7 +108,6 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
         }
       })
     );
-
     console.log(`Film Forum: Found ${detailShowtimes.length} showtimes (detail-page strategy)`);
     return detailShowtimes;
   } catch (error) {
@@ -93,25 +117,187 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
 }
 
 /**
+ * Parse the "playing this week" schedule from the Film Forum homepage.
+ *
+ * The homepage has a weekly schedule organized by day-of-week, e.g.:
+ *
+ *   FRI
+ *   BILLY PRESTON: THAT'S THE WAY GOD PLANNED IT  12:15  2:30  4:45  7:00
+ *   CALLE MALAGA                                   12:20  2:50  5:30  8:00
+ *
+ *   SAT
+ *   BILLY PRESTON: THAT'S THE WAY GOD PLANNED IT  11:00  1:15  3:30  5:45  8:00
+ *   ...
+ *
+ * We try multiple selector strategies to find this structure.
+ */
+function extractWeekSchedule($: cheerio.CheerioAPI, html: string): Showtime[] {
+  // Strategy A: look for a container that holds day-labeled sections.
+  // Common class patterns: .schedule, .week-schedule, .showtimes-week, .playing-this-week
+  const scheduleSel =
+    '.schedule, .week-schedule, .showtimes-week, .playing-this-week, ' +
+    '#schedule, #showtimes, .now-playing-schedule, .weekly-schedule';
+
+  // Try common schedule container selectors
+  if ($(scheduleSel).length) {
+    const result = parseDayOrganizedSchedule($, scheduleSel);
+    if (result.length > 0) return result;
+  }
+
+  // Try to find any element whose direct text contains "playing this week", use its parent
+  let containerSel: string | null = null;
+  $('*').each((_, el) => {
+    if (containerSel) return;
+    const text = $(el).clone().children().remove().end().text().toLowerCase();
+    if (text.includes('playing this week')) {
+      const parentClass = $(el).parent().attr('class');
+      if (parentClass) containerSel = `.${parentClass.split(' ')[0]}`;
+    }
+  });
+  if (containerSel) {
+    const result = parseDayOrganizedSchedule($, containerSel);
+    if (result.length > 0) return result;
+  }
+
+  // Strategy B: scan the full body for day-of-week labels followed by film rows
+  const result = parseDayOrganizedSchedule($, 'body');
+  if (result.length > 0) return result;
+
+  // Strategy C: look for a table-based schedule
+  const tableResult = parseScheduleTable($);
+  if (tableResult.length > 0) return tableResult;
+
+  return [];
+}
+
+/**
+ * Scan a container for the day-of-week → film → times pattern.
+ *
+ * Looks for text that is a day abbreviation (FRI, SAT, etc.) or full day name,
+ * then treats subsequent sibling/child elements as film+time rows until the
+ * next day label is encountered.
+ */
+function parseDayOrganizedSchedule(
+  $: cheerio.CheerioAPI,
+  containerSel: string
+): Showtime[] {
+  const showtimes: Showtime[] = [];
+
+  // Collect all text-bearing leaf-ish elements in document order
+  const elements = $(containerSel).find('*').toArray();
+
+  let currentDate: string | null = null;
+
+  for (const el of elements) {
+    const $el = $(el);
+    // Get only this element's direct text (not children's text)
+    const directText = $el.clone().children().remove().end().text().replace(/\s+/g, ' ').trim();
+    if (!directText) continue;
+
+    // Check if this element is a day-of-week label
+    const dow = DOW_MAP[directText.toLowerCase()];
+    if (dow !== undefined && directText.length <= 10) {
+      currentDate = isoDateForDow(dow);
+      continue;
+    }
+
+    if (!currentDate) continue;
+
+    // Try to read film title + times from this element's text
+    // Pattern: "FILM TITLE  12:15  2:30  4:45  7:00"
+    const fullText = $el.text().replace(/\s+/g, ' ').trim();
+    const times = extractTimesFromText(fullText);
+    if (times.length === 0) continue;
+
+    // Film title: text before the first time
+    const firstTimeIdx = fullText.search(/\b\d{1,2}:\d{2}/);
+    const film = firstTimeIdx > 0
+      ? fullText.slice(0, firstTimeIdx).replace(/\s+/g, ' ').trim()
+      : '';
+    if (!film || film.length < 2) continue;
+
+    // Ticket URL: nearest /tickets/ or /film/ link
+    const href =
+      $el.find('a[href*="/tickets/"], a[href*="/film/"]').first().attr('href') ||
+      $el.closest('a[href*="/tickets/"], a[href*="/film/"]').first().attr('href') ||
+      $el.parent().find('a[href*="/tickets/"], a[href*="/film/"]').first().attr('href') ||
+      '';
+    const ticketUrl = href ? toAbsoluteUrl(href) : HOMEPAGE_URL;
+
+    for (const time of times) {
+      const id = `filmforum-${film}-${currentDate}-${time}`.replace(/\s+/g, '-').replace(/[^a-z0-9\-]/gi, '').toLowerCase();
+      // Avoid duplicates
+      if (!showtimes.some(s => s.id === id)) {
+        showtimes.push({ id, film, theater: 'Film Forum', date: currentDate!, time, ticketUrl });
+      }
+    }
+  }
+
+  return showtimes;
+}
+
+/** Parse a table-based schedule where rows are (day, film, times). */
+function parseScheduleTable($: cheerio.CheerioAPI): Showtime[] {
+  const showtimes: Showtime[] = [];
+
+  $('table tr').each((_, tr) => {
+    const cells = $(tr).find('td, th');
+    if (cells.length < 2) return;
+
+    const firstCell = cells.eq(0).text().trim().toUpperCase();
+    const dow = DOW_MAP[firstCell.toLowerCase()];
+    const isoDate = dow !== undefined ? isoDateForDow(dow) : null;
+    if (!isoDate) return;
+
+    cells.each((i, td) => {
+      if (i === 0) return;
+      const text = $(td).text().trim();
+      const times = extractTimesFromText(text);
+      if (times.length === 0) return;
+
+      const firstTimeIdx = text.search(/\b\d{1,2}:\d{2}/);
+      const film = firstTimeIdx > 0 ? text.slice(0, firstTimeIdx).trim() : '';
+      if (!film) return;
+
+      const href = $(td).find('a').first().attr('href') || '';
+      const ticketUrl = href ? toAbsoluteUrl(href) : HOMEPAGE_URL;
+
+      for (const time of times) {
+        const id = `filmforum-${film}-${isoDate}-${time}`.replace(/\s+/g, '-').replace(/[^a-z0-9\-]/gi, '').toLowerCase();
+        if (!showtimes.some(s => s.id === id)) {
+          showtimes.push({ id, film, theater: 'Film Forum', date: isoDate, time, ticketUrl });
+        }
+      }
+    });
+  });
+
+  return showtimes;
+}
+
+/**
+ * Return the ISO date of the next (or current) occurrence of a given day of
+ * the week within the current week (Mon–Sun window).
+ */
+function isoDateForDow(dow: number): string {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diff = dow - today.getDay();
+  // Keep within ±3 days of today to stay in the "this week" window
+  const d = new Date(today);
+  d.setDate(today.getDate() + diff);
+  // If the day is more than 3 days in the past, it's next week
+  if (diff < -3) d.setDate(d.getDate() + 7);
+  return formatISO(d);
+}
+
+/**
  * Try to extract showtimes directly from the now_playing index page.
- *
- * Film Forum's current page structure:
- *   <div class="film">
- *     <h3>FILM TITLE</h3>
- *     <div class="showtimes">12:15 2:30 4:45 7:00</div>
- *     <a href="/tickets/film-slug" class="buy-tickets">Showtimes & Tickets</a>
- *   </div>
- *
- * or (older structure):
- *   <div class="film">
- *     <h2 class="main-title"><a href="/film/slug">FILM TITLE</a></h2>
- *   </div>
+ * Film Forum currently wraps each film in a div.film block with embedded showtimes.
  */
 function extractFromIndexPage($: cheerio.CheerioAPI, _html: string): Showtime[] {
   const showtimes: Showtime[] = [];
   const today = formatISO(new Date());
 
-  // Try multiple film-block selectors
   const filmBlockSel = 'div.film, article.film, li.film, .film-listing, .now-playing-item';
   const filmBlocks = $(filmBlockSel);
   console.log(`Film Forum: Found ${filmBlocks.length} film blocks with selector "${filmBlockSel}"`);
@@ -119,41 +305,33 @@ function extractFromIndexPage($: cheerio.CheerioAPI, _html: string): Showtime[] 
   filmBlocks.each((_, block) => {
     const $block = $(block);
 
-    // Title
     const titleEl = $block.find('h1, h2, h3, h4, .film-title, .title').first().clone();
     titleEl.find('br').replaceWith(' ');
     const film = titleEl.text().replace(/\s+/g, ' ').trim();
     if (!film) return;
 
-    // Ticket/film URL
     const ticketHref =
       $block.find('a[href*="/tickets/"], a.buy-tickets, a[href*="ticket"]').first().attr('href') ||
       $block.find('a[href*="/film/"]').first().attr('href') ||
-      $block.find('a').first().attr('href') ||
-      '';
+      $block.find('a').first().attr('href') || '';
     const ticketUrl = ticketHref ? toAbsoluteUrl(ticketHref) : NOW_PLAYING_URL;
 
-    // Image
     const imgSrc = $block.find('img').first().attr('src') || $block.find('img').first().attr('data-src');
     const imageUrl = imgSrc ? toAbsoluteUrl(imgSrc) : undefined;
 
-    // Look for showtime text inside the block
     const showtimeText = $block.find('.showtimes, .showtime, .times, [class*="showtime"]').text().trim();
     const timeMatches = extractTimesFromText(showtimeText);
 
-    if (timeMatches.length > 0) {
-      // We have actual times — create entries for today
-      for (const time of timeMatches) {
-        showtimes.push({
-          id: `filmforum-${film}-${today}-${time}`.replace(/\s+/g, '-').replace(/[^a-z0-9\-]/gi, '').toLowerCase(),
-          film,
-          theater: 'Film Forum',
-          date: today,
-          time,
-          ticketUrl,
-          imageUrl,
-        });
-      }
+    for (const time of timeMatches) {
+      showtimes.push({
+        id: `filmforum-${film}-${today}-${time}`.replace(/\s+/g, '-').replace(/[^a-z0-9\-]/gi, '').toLowerCase(),
+        film,
+        theater: 'Film Forum',
+        date: today,
+        time,
+        ticketUrl,
+        imageUrl,
+      });
     }
   });
 
@@ -163,8 +341,6 @@ function extractFromIndexPage($: cheerio.CheerioAPI, _html: string): Showtime[] 
 /** Collect film detail page URLs from the now_playing page. */
 function collectFilmUrls($: cheerio.CheerioAPI): Set<string> {
   const filmUrls = new Set<string>();
-
-  // Try "/film/" links first (classic Film Forum URL pattern)
   $('a[href*="filmforum.org/film"], a[href*="/film/"]').each((_, el) => {
     const href = $(el).attr('href') || '';
     if (!href) return;
@@ -172,17 +348,13 @@ function collectFilmUrls($: cheerio.CheerioAPI): Set<string> {
     if (fullUrl === `${BASE_URL}/film` || fullUrl === `${BASE_URL}/film/`) return;
     filmUrls.add(toCanonicalUrl(fullUrl));
   });
-
-  // Also try "/tickets/" links as a fallback
   if (filmUrls.size === 0) {
     $('a[href*="/tickets/"]').each((_, el) => {
       const href = $(el).attr('href') || '';
       if (!href) return;
-      const fullUrl = toAbsoluteUrl(href);
-      filmUrls.add(toCanonicalUrl(fullUrl));
+      filmUrls.add(toCanonicalUrl(toAbsoluteUrl(href)));
     });
   }
-
   return filmUrls;
 }
 
@@ -190,18 +362,12 @@ function collectFilmUrls($: cheerio.CheerioAPI): Set<string> {
 function logDiagnostics($: cheerio.CheerioAPI, html: string): void {
   console.log('Film Forum: [DIAGNOSTIC] No films found. HTML preview:');
   console.log(html.slice(0, 500));
-
-  // Log all unique <a> href values that look film-related
   const links: string[] = [];
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
-    if (href.includes('film') || href.includes('ticket') || href.includes('movie')) {
-      links.push(href);
-    }
+    if (href.includes('film') || href.includes('ticket') || href.includes('movie')) links.push(href);
   });
   console.log(`Film Forum: [DIAGNOSTIC] Film-related links (${links.length}):`, links.slice(0, 20));
-
-  // Log class names present on the page to help identify correct selectors
   const classes = new Set<string>();
   $('[class]').each((_, el) => {
     const cls = $(el).attr('class') || '';
@@ -212,11 +378,7 @@ function logDiagnostics($: cheerio.CheerioAPI, html: string): void {
 
 /**
  * Fetch a single Film Forum film detail page and produce Showtime entries.
- *
- * Film detail page selectors (verified 2023, may have changed):
- *   h2.main-title                 – film title
- *   h2.main-title + div.details p – date range text
- *   div.copy p                    – description (longest)
+ * Used as a fallback when the homepage/index-page strategies don't yield results.
  */
 async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
   const response = await fetch(filmUrl, { headers: HEADERS });
@@ -225,7 +387,6 @@ async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
   const html = await response.text();
   const $ = cheerio.load(html);
 
-  // Film title — try multiple selectors
   const titleSelectors = ['h2.main-title', 'h1.main-title', 'h1.film-title', 'h2.film-title', 'h1', 'h2'];
   let film = '';
   for (const sel of titleSelectors) {
@@ -236,7 +397,6 @@ async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
   }
   if (!film) return [];
 
-  // Description: longest <p>
   let description: string | undefined;
   let maxLen = 0;
   $('div.copy p, .description p, .synopsis p, p').each((_, el) => {
@@ -247,18 +407,14 @@ async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
     }
   });
 
-  // Image
   const imgSrc =
     $('img.poster, div.poster img, div.film-image img, .hero img').first().attr('src') ||
     $('img').first().attr('src') || undefined;
   const imageUrl = imgSrc ? toAbsoluteUrl(imgSrc) : undefined;
 
-  // Ticket URL
-  const ticketHref =
-    $('a[href*="/tickets/"], a.btn-tickets, a[href*="ticket"]').first().attr('href');
+  const ticketHref = $('a[href*="/tickets/"], a.btn-tickets, a[href*="ticket"]').first().attr('href');
   const ticketUrl = ticketHref ? toAbsoluteUrl(ticketHref) : filmUrl;
 
-  // Date range text — try multiple selectors
   const dateText =
     $('h2.main-title + div.details p, h1.main-title + div.details p').first().text().trim() ||
     $('div.details p, .run-dates, .dates, .schedule-dates').first().text().trim();
@@ -279,12 +435,12 @@ async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
 }
 
 /**
- * Extract time strings like "1:15 PM", "2:30", "4:45 PM" from raw text.
- * Used when showtimes appear directly on the now_playing index page.
+ * Extract time strings from raw text.
+ * Handles "1:15 PM", "2:30 pm", "13:15", "12:15 2:30 4:45 7:00" (bare times without AM/PM).
  */
 function extractTimesFromText(text: string): string[] {
   const times: string[] = [];
-  // Match 12-hour with AM/PM
+  // Match 12-hour with AM/PM first
   const re12 = /\b(\d{1,2}):(\d{2})\s*(AM|PM)\b/gi;
   let m: RegExpExecArray | null;
   while ((m = re12.exec(text)) !== null) {
@@ -292,11 +448,12 @@ function extractTimesFromText(text: string): string[] {
   }
   if (times.length > 0) return times;
 
-  // Match 12-hour without AM/PM (e.g. "12:15 2:30 4:45 7:00")
-  const re24 = /\b(\d{1,2}):(\d{2})\b/g;
-  while ((m = re24.exec(text)) !== null) {
+  // Bare HH:MM (no AM/PM) — convert to 12-hour assuming cinema hours (9am–midnight)
+  const reBare = /\b(\d{1,2}):(\d{2})\b/g;
+  while ((m = reBare.exec(text)) !== null) {
     const h = parseInt(m[1], 10);
     const min = m[2];
+    if (h < 9 || h > 23) continue; // skip implausible hours
     const period = h >= 12 ? 'PM' : 'AM';
     const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
     times.push(`${h12}:${min} ${period}`);
@@ -304,18 +461,11 @@ function extractTimesFromText(text: string): string[] {
   return times;
 }
 
-/**
- * Parse Film Forum date text into an array of ISO date strings (YYYY-MM-DD).
- * Handles "Feb 21 – Mar 5", "Opens Friday, February 21", "MUST END THURSDAY", etc.
- */
 function parseDateRange(text: string): string[] {
   if (!text) return [];
-
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-
   const extractedDates = extractDatesFromText(text);
-
   if (extractedDates.length === 0) {
     const dowMatch = text.match(
       /(?:must\s+end|ends?|through|thru)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i
@@ -326,7 +476,6 @@ function parseDateRange(text: string): string[] {
     }
     return [];
   }
-
   if (extractedDates.length === 1) {
     const d = extractedDates[0];
     if (text.match(/open(?:s|ing)/i)) {
@@ -335,10 +484,8 @@ function parseDateRange(text: string): string[] {
     }
     return fillDateRange(today, d);
   }
-
   const [start, end] = extractedDates;
-  const rangeStart = start >= today ? start : today;
-  return fillDateRange(rangeStart, end);
+  return fillDateRange(start >= today ? start : today, end);
 }
 
 function extractDatesFromText(text: string): Date[] {
@@ -383,11 +530,7 @@ function fillDateRange(start: Date, end: Date): string[] {
 }
 
 function nextOccurrenceOfDay(dayName: string): Date | null {
-  const days: Record<string, number> = {
-    sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
-    thursday: 4, friday: 5, saturday: 6,
-  };
-  const target = days[dayName.toLowerCase()];
+  const target = DOW_MAP[dayName.toLowerCase()];
   if (target === undefined) return null;
   const d = new Date();
   d.setHours(0, 0, 0, 0);
