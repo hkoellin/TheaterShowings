@@ -7,35 +7,41 @@ const NOW_PLAYING_URL = `${BASE_URL}/now_playing`;
 const HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.5',
 };
 
-const MONTH_MAP: Record<string, number> = {
-  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
-};
-
-/** 30-day threshold for rolling past dates to next year */
+/**
+ * 30-day threshold for rolling past dates to next year.
+ */
 const PAST_DATE_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Resolve a possibly-relative href to an absolute URL. */
+function toAbsoluteUrl(href: string): string {
+  return href.startsWith('http') ? href : `${BASE_URL}${href}`;
+}
+
+/** Strip query strings, anchors, and trailing slashes to get a canonical URL. */
+function toCanonicalUrl(url: string): string {
+  return url.split('?')[0].split('#')[0].replace(/\/$/, '');
+}
 
 /**
  * Scraper for Film Forum (https://filmforum.org/now_playing)
  *
- * Strategy:
- *   1. Fetch /now_playing to get the list of currently playing films and their
- *      detail-page links (each film's page has the actual daily showtimes).
- *   2. Fetch each film detail page concurrently to extract per-day showtimes.
+ * Real site structure (verified from HTML inspection):
  *
- * Film Forum now-playing page structure:
- *   div.film (or li.film-listing, article, etc.)  – one per film
- *     h1/h2/h3 > a                                 – title + detail link
- *     img                                           – poster
- *     a[href*="/film/"]                             – detail page link fallback
+ * now_playing page:
+ *   a[href*="filmforum.org/film"]  – links to individual film detail pages
  *
- * Film detail page showtime structure:
- *   div.showtimes, table.showtimes, ul.showtimes, etc.
- *     Each date group contains:
- *       date label (e.g. "FRI FEB 21" or "Feb 21")
- *       time links  (e.g. "1:15 PM", "4:45 PM")
+ * Film detail page (e.g. https://filmforum.org/film/some-film):
+ *   h2.main-title                 – film title
+ *   h2.main-title + div.details p – date information text (e.g. "Feb 21 – Mar 5")
+ *   div.copy p                    – description paragraphs (longest chosen)
+ *   a[href*="filmforum.org/tickets"] or a.btn-tickets – ticket purchase link
+ *
+ * Film Forum does not embed individual daily showtimes in the page HTML;
+ * each film runs across a date range with "See Times" linking to the film page.
  */
 export async function scrapeFilmForum(): Promise<Showtime[]> {
   try {
@@ -49,81 +55,34 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
     const html = await response.text();
     const $ = cheerio.load(html);
 
-    // Collect film entries: (title, detailUrl, imageUrl)
-    const filmEntries: { film: string; detailUrl: string; imageUrl?: string }[] = [];
+    // Collect unique film detail page URLs from the now_playing page.
+    // Film detail links match href containing "filmforum.org/film" or "/film/".
+    const filmUrls = new Set<string>();
 
-    // Try multiple container selectors to find film blocks
-    const filmContainerSel =
-      '.film, .film-listing, .now-playing-film, .now-playing-item, ' +
-      'li.film, article.film, div[class*="film"], div[class*="movie"]';
-
-    $(filmContainerSel).each((_, el) => {
-      const $el = $(el);
-
-      // Title: prefer heading > a, fallback to heading text
-      const titleLink = $el.find('h1 a, h2 a, h3 a, h4 a, .film-title a, .title a').first();
-      const titleHeading = $el.find('h1, h2, h3, h4, .film-title, .title').first();
-      const film =
-        (titleLink.text().trim() || titleHeading.text().trim()).replace(/\s+/g, ' ');
-      if (!film) return;
-
-      // Detail page link
-      const hrefRaw =
-        titleLink.attr('href') ||
-        $el.find('a[href*="/film/"]').first().attr('href') ||
-        $el.find('a').first().attr('href') ||
-        '';
-      if (!hrefRaw) return;
-
-      const detailUrl = hrefRaw.startsWith('http')
-        ? hrefRaw
-        : `${BASE_URL}${hrefRaw}`;
-
-      // Poster image
-      const imgSrc =
-        $el.find('img').first().attr('src') ||
-        $el.find('img').first().attr('data-src') ||
-        undefined;
-      const imageUrl = imgSrc
-        ? imgSrc.startsWith('http')
-          ? imgSrc
-          : `${BASE_URL}${imgSrc}`
-        : undefined;
-
-      // Avoid duplicates
-      if (!filmEntries.some((e) => e.detailUrl === detailUrl)) {
-        filmEntries.push({ film, detailUrl, imageUrl });
-      }
+    $('a[href*="filmforum.org/film"], a[href*="/film/"]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      if (!href) return;
+      const fullUrl = toAbsoluteUrl(href);
+      // Exclude the /film/ listing page itself or anchor-only fragments
+      if (fullUrl === `${BASE_URL}/film` || fullUrl === `${BASE_URL}/film/`) return;
+      const canonical = toCanonicalUrl(fullUrl);
+      filmUrls.add(canonical);
     });
 
-    // If the film-block approach found nothing, try heading-level scan
-    if (filmEntries.length === 0) {
-      $('h1 a[href*="/film/"], h2 a[href*="/film/"], h3 a[href*="/film/"]').each((_, el) => {
-        const $a = $(el);
-        const film = $a.text().trim().replace(/\s+/g, ' ');
-        const hrefRaw = $a.attr('href') || '';
-        if (!film || !hrefRaw) return;
-        const detailUrl = hrefRaw.startsWith('http') ? hrefRaw : `${BASE_URL}${hrefRaw}`;
-        if (!filmEntries.some((e) => e.detailUrl === detailUrl)) {
-          filmEntries.push({ film, detailUrl });
-        }
-      });
-    }
-
-    if (filmEntries.length === 0) {
-      console.log('Film Forum: No film entries found on now_playing page');
+    if (filmUrls.size === 0) {
+      console.log('Film Forum: No film links found on now_playing page');
       return [];
     }
 
-    // Fetch each film detail page and extract showtimes
+    // Fetch each film detail page concurrently
     const showtimes: Showtime[] = [];
     await Promise.all(
-      filmEntries.map(async ({ film, detailUrl, imageUrl }) => {
+      Array.from(filmUrls).map(async (filmUrl) => {
         try {
-          const filmShowtimes = await scrapeFilmPage(film, detailUrl, imageUrl);
+          const filmShowtimes = await scrapeFilmPage(filmUrl);
           showtimes.push(...filmShowtimes);
         } catch (err) {
-          console.error(`Film Forum: Error scraping film page ${detailUrl}`, err);
+          console.error(`Film Forum: Error scraping film page ${filmUrl}`, err);
         }
       })
     );
@@ -137,239 +96,206 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
 }
 
 /**
- * Fetch a single Film Forum film page and extract its showtimes.
+ * Fetch a single Film Forum film detail page and produce Showtime entries.
  *
- * Film detail pages have a schedule section that groups showtimes by date.
- * Common patterns observed:
- *   - table rows: <tr><td class="date">FRI FEB 21</td><td class="times"><a>1:15 PM</a>…</td></tr>
- *   - div groups: <div class="showtime-date"><span>FRI FEB 21</span>…<a>1:15 PM</a></div>
- *   - list items:  <ul class="showtimes"><li><span class="date">…</span><a>1:15 PM</a></li></ul>
+ * Film detail page HTML:
+ *   <h2 class="main-title">FILM TITLE</h2>
+ *   <div class="details">
+ *     <p>Feb 21 – Mar 5, 2026</p>     ← date range or single date text
+ *   </div>
+ *   <div class="copy">
+ *     <p>...</p>                       ← description paragraphs
+ *   </div>
+ *
+ * Since Film Forum does not expose per-showing times in the HTML, we create
+ * one "See Times" entry per day in the film's run (today through closing date).
  */
-async function scrapeFilmPage(
-  film: string,
-  detailUrl: string,
-  imageUrl?: string
-): Promise<Showtime[]> {
-  const response = await fetch(detailUrl, { headers: HEADERS });
+async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
+  const response = await fetch(filmUrl, { headers: HEADERS });
   if (!response.ok) return [];
 
   const html = await response.text();
   const $ = cheerio.load(html);
-  const showtimes: Showtime[] = [];
 
-  // Description
-  const description =
-    $('p.synopsis, .film-description p, .description p, .synopsis')
-      .first()
-      .text()
-      .trim() || undefined;
+  // Film title from h2.main-title
+  // Replace <br> elements with spaces via Cheerio DOM, then use .text() to avoid HTML injection
+  const titleEl = $('h2.main-title').first().clone();
+  titleEl.find('br').replaceWith(' ');
+  const film = titleEl.text().replace(/\s+/g, ' ').trim();
+  if (!film) return [];
 
-  // --- Strategy 1: table-based showtimes ---
-  // <table class="showtimes"> or <table> containing date/time cells
-  $('table.showtimes tr, .showtimes-table tr, table tr').each((_, tr) => {
-    const $tr = $(tr);
-    const cells = $tr.find('td');
-    if (cells.length < 2) return;
-
-    const dateText = cells.eq(0).text().trim();
-    const isoDate = parseDateText(dateText);
-    if (!isoDate) return;
-
-    cells.each((i, td) => {
-      if (i === 0) return; // skip date cell
-      $(td)
-        .find('a, span, .time')
-        .each((_, timeEl) => {
-          const time = normalizeTime($(timeEl).text().trim());
-          if (!time) return;
-          const href = $(timeEl).attr('href') || '';
-          const ticketUrl = href
-            ? href.startsWith('http')
-              ? href
-              : `${BASE_URL}${href}`
-            : detailUrl;
-          showtimes.push(
-            makeShowtime(film, isoDate, time, ticketUrl, imageUrl, description)
-          );
-        });
-    });
+  // Description: longest <p> inside div.copy
+  let description: string | undefined;
+  let maxLen = 0;
+  $('div.copy p').each((_, el) => {
+    const t = $(el).text().trim();
+    if (t.length > maxLen) {
+      maxLen = t.length;
+      description = t;
+    }
   });
 
-  // --- Strategy 2: div/section-based date groups ---
-  if (showtimes.length === 0) {
-    const dateGroupSel =
-      '.showtime-date, .showtimes-date, .date-group, ' +
-      'div[class*="showtime"], div[class*="schedule-day"]';
+  // Image URL
+  const imgSrc = $('img.poster, div.poster img, div.film-image img, .hero img').first().attr('src') ||
+    $('img').first().attr('src') || undefined;
+  const imageUrl = imgSrc ? toAbsoluteUrl(imgSrc) : undefined;
 
-    $(dateGroupSel).each((_, group) => {
-      const $group = $(group);
-      const dateText =
-        $group.find('.date, .day, h3, h4, h5, strong').first().text().trim() ||
-        $group.clone().children().remove().end().text().trim();
-      const isoDate = parseDateText(dateText);
-      if (!isoDate) return;
+  // Ticket URL: prefer explicit ticket link, else the film page itself
+  const ticketHref = $('a[href*="filmforum.org/tickets"], a.btn-tickets, a[href*="ticket"]').first().attr('href');
+  const ticketUrl = ticketHref ? toAbsoluteUrl(ticketHref) : filmUrl;
 
-      $group.find('a, .time-link, .showtime-time').each((_, timeEl) => {
-        const time = normalizeTime($(timeEl).text().trim());
-        if (!time) return;
-        const href = $(timeEl).attr('href') || '';
-        const ticketUrl = href
-          ? href.startsWith('http')
-            ? href
-            : `${BASE_URL}${href}`
-          : detailUrl;
-        showtimes.push(
-          makeShowtime(film, isoDate, time, ticketUrl, imageUrl, description)
-        );
-      });
-    });
-  }
+  // Date range text from the div.details following h2.main-title
+  const dateText = $('h2.main-title + div.details p').first().text().trim() ||
+    $('div.details p').first().text().trim();
 
-  // --- Strategy 3: flat list of time links with sibling date labels ---
-  if (showtimes.length === 0) {
-    let currentDate: string | null = null;
+  const dates = parseDateRange(dateText);
+  if (dates.length === 0) return [];
 
-    // Walk elements in content containers looking for date headings and time links
-    $('.showtimes, .schedule, main, .content, #content, article').find('*').each((_, el) => {
-      const $el = $(el);
-      const tag = (el as { tagName?: string }).tagName?.toLowerCase() || '';
-      const text = $el.clone().children().remove().end().text().trim();
-
-      // If this looks like a date heading, set current date
-      if (['h2', 'h3', 'h4', 'h5', 'strong', 'b', 'span', 'p'].includes(tag)) {
-        const d = parseDateText(text);
-        if (d) {
-          currentDate = d;
-          return;
-        }
-      }
-
-      // If this is a time link and we have a current date
-      if (tag === 'a' && currentDate) {
-        const time = normalizeTime(text);
-        if (time) {
-          const href = $el.attr('href') || '';
-          const ticketUrl = href
-            ? href.startsWith('http')
-              ? href
-              : `${BASE_URL}${href}`
-            : detailUrl;
-          showtimes.push(
-            makeShowtime(film, currentDate, time, ticketUrl, imageUrl, description)
-          );
-        }
-      }
-    });
-  }
-
-  return showtimes;
-}
-
-/** Build a Showtime object. */
-function makeShowtime(
-  film: string,
-  date: string,
-  time: string,
-  ticketUrl: string,
-  imageUrl?: string,
-  description?: string
-): Showtime {
-  return {
-    id: `filmforum-${film}-${date}-${time}`
+  return dates.map((date) => ({
+    id: `filmforum-${film}-${date}`
       .replace(/\s+/g, '-')
       .replace(/[^a-z0-9\-]/gi, '')
       .toLowerCase(),
     film,
     theater: 'Film Forum',
     date,
-    time,
+    time: 'See Times',
     ticketUrl,
     imageUrl,
     description,
+  }));
+}
+
+/**
+ * Parse Film Forum date text into an array of ISO date strings (YYYY-MM-DD).
+ *
+ * Handles formats like:
+ *   "Tuesday, February 21"                         – single date
+ *   "Friday, February 21 – Wednesday, March 5"    – date range  
+ *   "Wednesday, November 1 - Tuesday, November 14" – date range with hyphen
+ *   "Feb 21 – Mar 5, 2026"                        – abbreviated range
+ *   "HELD OVER! MUST END THURSDAY!"               – closing day-of-week only
+ *   "Opens Friday, February 21"                   – opening date
+ */
+function parseDateRange(text: string): string[] {
+  if (!text) return [];
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  // Try to find one or two calendar dates in the text
+  const extractedDates = extractDatesFromText(text);
+
+  if (extractedDates.length === 0) {
+    // Try "MUST END DAY_OF_WEEK" or "ENDS DAY_OF_WEEK"
+    const dowMatch = text.match(
+      /(?:must\s+end|ends?|through|thru)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i
+    );
+    if (dowMatch) {
+      const closing = nextOccurrenceOfDay(dowMatch[1]);
+      if (closing) return fillDateRange(today, closing);
+    }
+    return [];
+  }
+
+  if (extractedDates.length === 1) {
+    const d = extractedDates[0];
+    if (text.match(/open(?:s|ing)/i)) {
+      // Opening date – just return that one day if it's today or future;
+      // if the film already opened, show from today (film is still running)
+      if (d >= today) return [formatISO(d)];
+      return [formatISO(today)];
+    }
+    // Single run date
+    return fillDateRange(today, d);
+  }
+
+  // Two dates → range
+  const [start, end] = extractedDates;
+  const rangeStart = start >= today ? start : today;
+  return fillDateRange(rangeStart, end);
+}
+
+/**
+ * Extract up to two Date objects from a free-form date string.
+ * Handles "February 21", "Feb 21", "February 21, 2026", day-of-week prefixes, etc.
+ */
+function extractDatesFromText(text: string): Date[] {
+  const months: Record<string, number> = {
+    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
+    jan: 0, feb: 1, mar: 2, apr: 3, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
   };
-}
 
-/**
- * Parse a date string into ISO YYYY-MM-DD.
- * Handles formats like "FRI FEB 21", "Feb 21", "February 21", "02/21", etc.
- * Infers year from proximity to today.
- */
-function parseDateText(text: string): string | null {
-  if (!text) return null;
+  const pattern =
+    /(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:,?\s*(\d{4}))?/gi;
 
-  // Normalize: collapse whitespace, strip punctuation
-  const clean = text.toUpperCase().replace(/[,\.]/g, ' ').replace(/\s+/g, ' ').trim();
+  const found: Date[] = [];
+  let match: RegExpExecArray | null;
 
-  // Try "MON JAN 01" or "JAN 01" (with optional day-of-week prefix)
-  const wordy = clean.match(
-    /(?:MON|TUE|WED|THU|FRI|SAT|SUN)?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+(\d{1,2})/
-  );
-  if (wordy) {
-    const monthIdx = MONTH_MAP[wordy[1].toLowerCase().slice(0, 3)];
-    if (monthIdx !== undefined) {
-      const day = parseInt(wordy[2], 10);
-      return makeISODate(monthIdx, day);
+  while ((match = pattern.exec(text)) !== null) {
+    const monthStr = match[0].split(/\s+/)[0].toLowerCase();
+    const monthIdx = months[monthStr];
+    if (monthIdx === undefined) continue;
+
+    const day = parseInt(match[1], 10);
+    const yearStr = match[2];
+    const now = new Date();
+    let year = yearStr ? parseInt(yearStr, 10) : now.getFullYear();
+
+    const candidate = new Date(year, monthIdx, day);
+    // Roll to next year if the date is more than 30 days in the past
+    if (!yearStr && candidate.getTime() < now.getTime() - PAST_DATE_THRESHOLD_MS) {
+      year += 1;
     }
+
+    found.push(new Date(year, monthIdx, day));
+    if (found.length === 2) break;
   }
 
-  // Try MM/DD or MM-DD
-  const numeric = clean.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
-  if (numeric) {
-    const month = parseInt(numeric[1], 10) - 1;
-    const day = parseInt(numeric[2], 10);
-    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
-      return makeISODate(month, day);
-    }
-  }
-
-  return null;
+  return found;
 }
 
-/** Construct an ISO date, rolling over to next year if the date appears to be in the past. */
-function makeISODate(monthIdx: number, day: number): string {
-  const now = new Date();
-  let year = now.getFullYear();
-  const candidate = new Date(year, monthIdx, day);
-  // If more than 30 days in the past, assume next year
-  if (candidate.getTime() < now.getTime() - PAST_DATE_THRESHOLD_MS) {
-    year += 1;
+/** Fill in every calendar date from start through end (inclusive), capped at 2 weeks out. */
+function fillDateRange(start: Date, end: Date): string[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const twoWeeksOut = new Date(today.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+  const effectiveEnd = end > twoWeeksOut ? twoWeeksOut : end;
+  const dates: string[] = [];
+  const d = new Date(start);
+  d.setHours(0, 0, 0, 0);
+
+  while (d <= effectiveEnd) {
+    dates.push(formatISO(d));
+    d.setDate(d.getDate() + 1);
   }
-  const mm = String(monthIdx + 1).padStart(2, '0');
-  const dd = String(day).padStart(2, '0');
-  return `${year}-${mm}-${dd}`;
+  return dates;
 }
 
-/**
- * Normalize a raw time string into "H:MM AM/PM" format.
- * Handles "1:15 PM", "1:15pm", "13:15", "1 PM", etc.
- * Returns null if not a valid time.
- */
-function normalizeTime(raw: string): string | null {
-  if (!raw) return null;
-  const clean = raw.trim();
+/** Return the next occurrence of a named day of the week, including today if it matches. */
+function nextOccurrenceOfDay(dayName: string): Date | null {
+  const days: Record<string, number> = {
+    sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
+    thursday: 4, friday: 5, saturday: 6,
+  };
+  const target = days[dayName.toLowerCase()];
+  if (target === undefined) return null;
 
-  // 12-hour with minutes: "1:15 PM" or "1:15pm"
-  const match12 = clean.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-  if (match12) {
-    return `${match12[1]}:${match12[2]} ${match12[3].toUpperCase()}`;
-  }
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  let daysAhead = target - d.getDay();
+  if (daysAhead < 0) daysAhead += 7;
+  // daysAhead === 0 means today matches; include today as the closing day
+  d.setDate(d.getDate() + daysAhead);
+  return d;
+}
 
-  // 12-hour without minutes: "1 PM" or "1pm"
-  const match12NoMin = clean.match(/^(\d{1,2})\s*(AM|PM)$/i);
-  if (match12NoMin) {
-    return `${match12NoMin[1]}:00 ${match12NoMin[2].toUpperCase()}`;
-  }
-
-  // 24-hour: "13:15"
-  const match24 = clean.match(/^(\d{1,2}):(\d{2})$/);
-  if (match24) {
-    const h = parseInt(match24[1], 10);
-    const m = parseInt(match24[2], 10);
-    if (h > 23 || m > 59) return null;
-    const period = h >= 12 ? 'PM' : 'AM';
-    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-    return `${h12}:${match24[2]} ${period}`;
-  }
-
-  return null;
+/** Format a Date as YYYY-MM-DD. */
+function formatISO(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
