@@ -16,6 +16,23 @@ interface Subscriber {
   preferences: Preference[];
 }
 
+interface ShowtimeResult {
+  id: string;
+  film: string;
+  theater: string;
+  date: string;
+  time: string;
+  ticketUrl: string;
+  description?: string;
+  allTimes?: string[];
+}
+
+interface MatchedFilm {
+  film: string;
+  matchedBy: string; // e.g. "director: Sean Baker"
+  showtimes: ShowtimeResult[];
+}
+
 const PREF_TYPES = [
   { value: 'director' as const, label: 'Director', placeholder: 'e.g., Martin Scorsese' },
   { value: 'film' as const, label: 'Film Title', placeholder: 'e.g., Taxi Driver' },
@@ -27,6 +44,54 @@ const PREF_COLORS: Record<string, string> = {
   film: 'bg-blue-50 text-blue-700 border-blue-200',
   actor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
 };
+
+/** Client-side matching — same logic as lib/matcher.ts */
+function findClientMatches(showtimes: ShowtimeResult[], preferences: Preference[]): MatchedFilm[] {
+  // Map: film name → { matchedBy set, showtimes[] }
+  const filmMap = new Map<string, { matchedBy: Set<string>; showtimes: ShowtimeResult[] }>();
+
+  for (const st of showtimes) {
+    const filmLower = st.film.toLowerCase();
+    const descLower = (st.description || '').toLowerCase();
+    const combined = `${filmLower} ${descLower}`;
+
+    for (const pref of preferences) {
+      const valueLower = pref.value.toLowerCase();
+      let matched = false;
+
+      switch (pref.type) {
+        case 'film':
+          matched = filmLower.includes(valueLower);
+          break;
+        case 'director':
+          matched = combined.includes(valueLower);
+          break;
+        case 'actor':
+          matched = descLower.includes(valueLower);
+          break;
+      }
+
+      if (matched) {
+        const key = st.film;
+        if (!filmMap.has(key)) {
+          filmMap.set(key, { matchedBy: new Set(), showtimes: [] });
+        }
+        const entry = filmMap.get(key)!;
+        entry.matchedBy.add(`${pref.type}: ${pref.value}`);
+        // Avoid duplicate showtime entries (same id)
+        if (!entry.showtimes.some(s => s.id === st.id)) {
+          entry.showtimes.push(st);
+        }
+      }
+    }
+  }
+
+  return Array.from(filmMap.entries()).map(([film, data]) => ({
+    film,
+    matchedBy: Array.from(data.matchedBy).join(', '),
+    showtimes: data.showtimes.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)),
+  }));
+}
 
 export default function NotificationsPage() {
   // Lookup state
@@ -44,6 +109,31 @@ export default function NotificationsPage() {
   // UI state
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Matches state
+  const [matches, setMatches] = useState<MatchedFilm[]>([]);
+  const [matchesLoading, setMatchesLoading] = useState(false);
+
+  // Fetch showtimes and run matching against current preferences
+  const fetchMatches = useCallback(async (prefs: Preference[]) => {
+    if (prefs.length === 0) {
+      setMatches([]);
+      return;
+    }
+    setMatchesLoading(true);
+    try {
+      const res = await fetch('/api/showtimes');
+      if (res.ok) {
+        const data = await res.json();
+        const found = findClientMatches(data.showtimes, prefs);
+        setMatches(found);
+      }
+    } catch {
+      console.error('Failed to fetch showtimes for matching');
+    } finally {
+      setMatchesLoading(false);
+    }
+  }, []);
 
   // Check URL for email param (from notification email links)
   useEffect(() => {
@@ -67,11 +157,14 @@ export default function NotificationsPage() {
         setSubscriber(data.subscriber);
         setEmail(data.subscriber.email);
         setName(data.subscriber.name || '');
-        setPreferences(data.subscriber.preferences.map((p: Preference) => ({
+        const prefs = data.subscriber.preferences.map((p: Preference) => ({
           type: p.type,
           value: p.value,
-        })));
+        }));
+        setPreferences(prefs);
         setIsNewUser(false);
+        // Auto-fetch matching showtimes
+        fetchMatches(prefs);
       } else if (res.status === 404) {
         setSubscriber(null);
         setEmail(emailToLookup);
@@ -129,6 +222,8 @@ export default function NotificationsPage() {
           const data = await res.json();
           setSubscriber(data.subscriber);
           setMessage({ type: 'success', text: 'Preferences updated!' });
+          // Refresh matching showtimes
+          fetchMatches(preferences);
         } else {
           setMessage({ type: 'error', text: 'Failed to update preferences' });
         }
@@ -144,6 +239,8 @@ export default function NotificationsPage() {
           setSubscriber(data.subscriber);
           setIsNewUser(false);
           setMessage({ type: 'success', text: 'Subscribed! You\'ll get notified when matching films are showing.' });
+          // Fetch matching showtimes for the new subscriber
+          fetchMatches(preferences);
         } else {
           const data = await res.json();
           setMessage({ type: 'error', text: data.error || 'Failed to subscribe' });
@@ -167,6 +264,7 @@ export default function NotificationsPage() {
       setEmail('');
       setName('');
       setPreferences([]);
+      setMatches([]);
       setLookupEmail('');
       setIsNewUser(false);
       setMessage({ type: 'success', text: 'You\'ve been unsubscribed.' });
@@ -348,6 +446,77 @@ export default function NotificationsPage() {
               )}
             </div>
           </form>
+        )}
+
+        {/* Matching Showtimes */}
+        {(subscriber || isNewUser) && preferences.length > 0 && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Matching Showtimes</h2>
+                <p className="text-sm text-gray-500 mt-0.5">Current NYC showings that match your preferences</p>
+              </div>
+              {!matchesLoading && matches.length > 0 && (
+                <span className="text-xs font-medium text-gray-400 bg-gray-100 px-2.5 py-1 rounded-full">
+                  {matches.length} film{matches.length !== 1 ? 's' : ''} found
+                </span>
+              )}
+            </div>
+
+            {matchesLoading ? (
+              <div className="py-8 text-center">
+                <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-gray-300 border-t-gray-900" />
+                <p className="text-sm text-gray-500 mt-3">Searching theaters...</p>
+              </div>
+            ) : matches.length === 0 ? (
+              <div className="py-8 text-center">
+                <p className="text-2xl mb-2">🎬</p>
+                <p className="text-sm text-gray-500">
+                  {subscriber
+                    ? 'No current showings match your preferences. We\'ll email you when something comes up!'
+                    : 'Save your preferences to see matching showtimes.'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {matches.map((match) => (
+                  <div key={match.film} className="border border-gray-100 rounded-lg overflow-hidden">
+                    {/* Film header */}
+                    <div className="bg-gray-50 px-4 py-3 border-b border-gray-100">
+                      <h3 className="font-semibold text-gray-900">{match.film}</h3>
+                      <p className="text-xs text-gray-500 mt-0.5">Matched by {match.matchedBy}</p>
+                    </div>
+                    {/* Showtime rows */}
+                    <div className="divide-y divide-gray-50">
+                      {match.showtimes.map((st) => (
+                        <div key={st.id} className="px-4 py-2.5 flex items-center justify-between text-sm hover:bg-gray-50 transition-colors">
+                          <div className="flex items-center gap-3">
+                            <span className="text-gray-900 font-medium w-24">
+                              {new Date(st.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                            </span>
+                            <span className="text-gray-600">{st.allTimes ? st.allTimes.join(', ') : st.time}</span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-gray-500 text-xs">{st.theater}</span>
+                            {st.ticketUrl && (
+                              <a
+                                href={st.ticketUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors"
+                              >
+                                Tickets →
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
 
         {/* How it works */}
