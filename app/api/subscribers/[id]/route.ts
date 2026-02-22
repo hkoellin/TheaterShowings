@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { PreferenceType } from '@/app/generated/prisma/client';
+import { notifySingleSubscriber } from '@/lib/notify';
 
 /**
  * GET /api/subscribers/[id]
@@ -72,6 +73,13 @@ export async function PUT(
       data: updateData,
       include: { preferences: true },
     });
+
+    // If preferences were updated, immediately check for matching showtimes
+    if (preferences && Array.isArray(preferences)) {
+      notifySingleSubscriber(subscriber.id).catch(err =>
+        console.error('Immediate notification check failed:', err)
+      );
+    }
 
     return NextResponse.json({ subscriber });
   } catch (error) {

@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { getAllShowtimes } from '@/scrapers';
-import { findMatches } from '@/lib/matcher';
-import { sendNotificationEmail } from '@/lib/email';
+import { notifySingleSubscriber } from '@/lib/notify';
 
 /**
  * POST /api/notify
@@ -29,7 +28,7 @@ export async function POST(request: NextRequest) {
   try {
     console.log('Notification job started');
 
-    // Step 1: Scrape all showtimes
+    // Step 1: Scrape all showtimes once (shared across all subscribers)
     const showtimes = await getAllShowtimes();
     console.log(`Scraped ${showtimes.length} total showtimes`);
 
@@ -37,62 +36,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: 'No showtimes found', notified: 0 });
     }
 
-    // Step 2: Load all active subscribers with their preferences
+    // Step 2: Load all active subscribers
     const subscribers = await prisma.subscriber.findMany({
       where: { active: true },
-      include: { preferences: true },
+      select: { id: true },
     });
     console.log(`Found ${subscribers.length} active subscribers`);
 
     let totalNotified = 0;
     let totalMatches = 0;
 
-    // Step 3: For each subscriber, find matches and send notifications
+    // Step 3: Notify each subscriber using the shared helper
     for (const subscriber of subscribers) {
-      if (subscriber.preferences.length === 0) continue;
-
-      const matches = findMatches(showtimes, subscriber.preferences);
-      if (matches.length === 0) continue;
-
-      // Step 4: Filter out already-notified showtimes
-      const existingLogs = await prisma.notificationLog.findMany({
-        where: {
-          subscriberId: subscriber.id,
-          showtimeId: { in: matches.map(m => m.showtime.id) },
-        },
-        select: { showtimeId: true },
-      });
-      const notifiedIds = new Set(existingLogs.map((l: { showtimeId: string }) => l.showtimeId));
-      const newMatches = matches.filter(m => !notifiedIds.has(m.showtime.id));
-
-      if (newMatches.length === 0) continue;
-
-      // Step 5: Send email
       try {
-        await sendNotificationEmail({
-          subscriberEmail: subscriber.email,
-          subscriberName: subscriber.name,
-          subscriberId: subscriber.id,
-          matches: newMatches,
-        });
-
-        // Step 6: Log sent notifications
-        await prisma.notificationLog.createMany({
-          data: newMatches.map(m => ({
-            subscriberId: subscriber.id,
-            showtimeId: m.showtime.id,
-            filmTitle: m.showtime.film,
-            theater: m.showtime.theater,
-            date: m.showtime.date,
-          })),
-          skipDuplicates: true,
-        });
-
-        totalNotified++;
-        totalMatches += newMatches.length;
-        console.log(`Sent ${newMatches.length} matches to ${subscriber.email}`);
+        const result = await notifySingleSubscriber(subscriber.id, showtimes);
+        if (result && result.matchesSent > 0) {
+          totalNotified++;
+          totalMatches += result.matchesSent;
+        }
       } catch (error) {
-        console.error(`Failed to notify ${subscriber.email}:`, error);
+        console.error(`Failed to notify subscriber ${subscriber.id}:`, error);
       }
     }
 

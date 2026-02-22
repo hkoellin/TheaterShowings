@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { PreferenceType } from '@/app/generated/prisma/client';
+import { notifySingleSubscriber } from '@/lib/notify';
 
 /**
  * POST /api/subscribers
@@ -61,6 +62,11 @@ export async function POST(request: NextRequest) {
       },
       include: { preferences: true },
     });
+
+    // Fire-and-forget: immediately check for matching showtimes
+    notifySingleSubscriber(subscriber.id).catch(err =>
+      console.error('Immediate notification check failed:', err)
+    );
 
     return NextResponse.json({ subscriber }, { status: 201 });
   } catch (error) {
