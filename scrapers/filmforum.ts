@@ -15,6 +15,18 @@ const HEADERS = {
 /** 30-day threshold for rolling past dates to next year. */
 const PAST_DATE_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** Number of days in the past before a day-of-week is considered to be next week. */
+const PAST_DOW_THRESHOLD_DAYS = -3;
+
+/** Maximum description length to avoid capturing non-description page text. */
+const MAX_DESCRIPTION_LENGTH = 2000;
+
+/** Earliest plausible cinema showtime hour (9 AM). */
+const CINEMA_OPENING_HOUR = 9;
+
+/** Latest plausible cinema showtime hour (11 PM = 23). */
+const CINEMA_CLOSING_HOUR = 23;
+
 /** Day-of-week abbreviations → 0-based index */
 const DOW_MAP: Record<string, number> = {
   sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
@@ -286,7 +298,7 @@ function isoDateForDow(dow: number): string {
   const d = new Date(today);
   d.setDate(today.getDate() + diff);
   // If the day is more than 3 days in the past, it's next week
-  if (diff < -3) d.setDate(d.getDate() + 7);
+  if (diff < PAST_DOW_THRESHOLD_DAYS) d.setDate(d.getDate() + 7);
   return formatISO(d);
 }
 
@@ -401,7 +413,7 @@ async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
   let maxLen = 0;
   $('div.copy p, .description p, .synopsis p, p').each((_, el) => {
     const t = $(el).text().trim();
-    if (t.length > maxLen && t.length < 2000) { // cap at 2000 chars to avoid capturing non-description page text
+    if (t.length > maxLen && t.length < MAX_DESCRIPTION_LENGTH) {
       maxLen = t.length;
       description = t;
     }
@@ -434,6 +446,13 @@ async function scrapeFilmPage(filmUrl: string): Promise<Showtime[]> {
   }));
 }
 
+/** Convert a 24-hour value to a 12-hour display string with AM/PM period. */
+function convertTo12Hour(h24: number, min: string): string {
+  const period = h24 >= 12 ? 'PM' : 'AM';
+  const h12 = h24 === 0 ? 12 : h24 > 12 ? h24 - 12 : h24;
+  return `${h12}:${min} ${period}`;
+}
+
 /**
  * Extract time strings from raw text.
  * Handles "1:15 PM", "2:30 pm", "13:15", "12:15 2:30 4:45 7:00" (bare times without AM/PM).
@@ -453,10 +472,8 @@ function extractTimesFromText(text: string): string[] {
   while ((m = reBare.exec(text)) !== null) {
     const h = parseInt(m[1], 10);
     const min = m[2];
-    if (h < 9 || h > 23) continue; // skip implausible hours
-    const period = h >= 12 ? 'PM' : 'AM';
-    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-    times.push(`${h12}:${min} ${period}`);
+    if (h < CINEMA_OPENING_HOUR || h > CINEMA_CLOSING_HOUR) continue; // skip implausible hours
+    times.push(convertTo12Hour(h, min));
   }
   return times;
 }
