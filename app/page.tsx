@@ -133,16 +133,25 @@ export default function Home() {
                 <p className="text-[12px] text-gray-500">Independent cinema showtimes</p>
               </div>
             </div>
-            <button
-              onClick={fetchShowtimes}
-              disabled={loading}
-              className="flex items-center gap-2 px-3.5 py-2 text-[13px] font-medium rounded-lg bg-white hover:bg-gray-100 border border-gray-200 text-gray-700 transition-all disabled:opacity-50"
-            >
+            <div className="flex items-center gap-2">
+              <a
+                href="/notifications"
+                className="flex items-center gap-1.5 px-3.5 py-2 text-[13px] font-medium rounded-lg bg-white hover:bg-gray-100 border border-gray-200 text-gray-700 transition-all"
+                title="Notification preferences"
+              >
+                🔔 Alerts
+              </a>
+              <button
+                onClick={fetchShowtimes}
+                disabled={loading}
+                className="flex items-center gap-2 px-3.5 py-2 text-[13px] font-medium rounded-lg bg-white hover:bg-gray-100 border border-gray-200 text-gray-700 transition-all disabled:opacity-50"
+              >
               <svg className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182" />
               </svg>
               Refresh
             </button>
+            </div>
           </div>
 
           {/* Day strip */}

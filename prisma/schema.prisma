@@ -1,0 +1,61 @@
+// Prisma schema for TheaterShowings notification system
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A subscriber who wants email notifications about film showings.
+model Subscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  preferences  Preference[]
+  notifications NotificationLog[]
+}
+
+/// A single preference rule: "I want to know when X is showing."
+/// type is one of: "director", "film", "actor"
+/// value is the name to match (case-insensitive).
+model Preference {
+  id           String   @id @default(cuid())
+  subscriberId String
+  type         PreferenceType
+  value        String          // e.g., "Martin Scorsese", "TAXI DRIVER", "Robert De Niro"
+  createdAt    DateTime @default(now())
+
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriberId, type, value])
+  @@index([type, value])
+}
+
+enum PreferenceType {
+  director
+  film
+  actor
+}
+
+/// Tracks which notifications have already been sent to avoid duplicates.
+model NotificationLog {
+  id           String   @id @default(cuid())
+  subscriberId String
+  showtimeId   String   // matches Showtime.id from the scraper
+  filmTitle    String
+  theater      String
+  date         String   // ISO date
+  sentAt       DateTime @default(now())
+
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriberId, showtimeId])
+  @@index([subscriberId, sentAt])
+}
