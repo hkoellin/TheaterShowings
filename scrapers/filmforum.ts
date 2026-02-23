@@ -84,6 +84,27 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
     console.log(`Film Forum: Found ${tabDays.length} day tabs: ${tabDays.map(t => t.tabId).join(', ')}`);
 
     // ----------------------------------------------------------------
+    // Step 1b: Build film-slug → ticket URL map from the main listing
+    // The page has links like: <a href="https://my.filmforum.org/events/bitter-rice">SHOWTIMES & TICKETS</a>
+    // near film links like: <a href="/film/bitter-rice">BITTER RICE</a>
+    // The ticket slug often differs from the film slug (e.g., billy-preston vs billy-preston-thats-the-way-god-planned-it)
+    // ----------------------------------------------------------------
+    const ticketUrlMap = new Map<string, string>();
+    $('a[href*="my.filmforum.org/events/"]').each((_, el) => {
+      const ticketHref = $(el).attr('href') || '';
+      // Find the nearest film link — walk up and look for an <a href="/film/...">
+      const $container = $(el).parent();
+      const filmLink = $container.find('a[href*="/film/"]').first().attr('href')
+        || $container.prev().find('a[href*="/film/"]').first().attr('href')
+        || $container.prevAll().find('a[href*="/film/"]').first().attr('href') || '';
+      const filmSlug = filmLink.split('/').pop() || '';
+      if (filmSlug && ticketHref) {
+        ticketUrlMap.set(filmSlug, ticketHref);
+      }
+    });
+    console.log(`Film Forum: Found ${ticketUrlMap.size} ticket URL mappings`);
+
+    // ----------------------------------------------------------------
     // Step 2: For each tab, resolve the actual calendar date
     // Each tab div has an HTML comment like <!-- 21 --> with the day number
     // ----------------------------------------------------------------
@@ -137,9 +158,9 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
         const filmHref = $titleLink.attr('href') || '';
         const filmUrl = filmHref.startsWith('http') ? filmHref : `${BASE_URL}${filmHref}`;
 
-        // Ticket URL: use my.filmforum.org/events/ pattern if available
+        // Ticket URL: look up the pre-scraped ticket link, fall back to the film detail page
         const filmSlug = filmHref.split('/').pop() || '';
-        const ticketUrl = `https://my.filmforum.org/events/${filmSlug}`;
+        const ticketUrl = ticketUrlMap.get(filmSlug) || filmUrl;
 
         // Series name (optional)
         const seriesLink = $p.find('a[href*="/series/"]').first();
