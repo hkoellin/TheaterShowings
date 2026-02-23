@@ -198,9 +198,9 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
           }
         }
 
-        // Track film URL for image enrichment
+        // Track film URL for enrichment, keyed by the film slug for matching
         if (filmUrl && !filmImageCache.has(filmUrl)) {
-          filmImageCache.set(filmUrl, '');
+          filmImageCache.set(filmUrl, film); // store the film title for matching
         }
       });
     }
@@ -208,25 +208,28 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
     console.log(`Film Forum: Found ${showtimes.length} showtimes from week schedule`);
 
     // ----------------------------------------------------------------
-    // Step 4 (optional): Enrich with OG images from film detail pages
-    // We fetch a small batch of film pages in parallel for images
+    // Step 4: Enrich with OG images, descriptions, and ticket URLs
+    // from film detail pages. Each detail page has a BUY TICKETS link
+    // with the correct my.filmforum.org/events/... URL.
     // ----------------------------------------------------------------
     if (showtimes.length > 0) {
-      const uniqueFilmUrls = Array.from(filmImageCache.keys()).slice(0, 10);
-      const imageResults = await Promise.allSettled(
+      const uniqueFilmUrls = Array.from(filmImageCache.keys()).slice(0, 25);
+      const detailResults = await Promise.allSettled(
         uniqueFilmUrls.map(async (url) => {
           try {
             const res = await fetch(url, { headers: HEADERS });
-            if (!res.ok) return { url, imageUrl: '' };
+            if (!res.ok) return { url, imageUrl: '', description: '', ticketUrl: '' };
             const detailHtml = await res.text();
             const $detail = cheerio.load(detailHtml);
             const ogImage = $detail('meta[property="og:image"]').attr('content') || '';
             const imageUrl = ogImage.startsWith('http') ? ogImage : ogImage ? `${BASE_URL}${ogImage}` : '';
-            // Also grab description from .copy p
+            // Grab description from .copy p
             const description = $detail('.copy > p').first().text().trim().slice(0, 300);
-            return { url, imageUrl, description };
+            // Extract BUY TICKETS link (e.g., https://my.filmforum.org/events/taxi-driver-tene)
+            const buyTicketsHref = $detail('a[href*="my.filmforum.org/events/"]').first().attr('href') || '';
+            return { url, imageUrl, description, ticketUrl: buyTicketsHref };
           } catch {
-            return { url, imageUrl: '', description: '' };
+            return { url, imageUrl: '', description: '', ticketUrl: '' };
           }
         })
       );
@@ -234,23 +237,28 @@ export async function scrapeFilmForum(): Promise<Showtime[]> {
       // Build lookup maps
       const imageMap = new Map<string, string>();
       const descMap = new Map<string, string>();
-      for (const result of imageResults) {
+      const detailTicketMap = new Map<string, string>();
+      for (const result of detailResults) {
         if (result.status === 'fulfilled') {
-          const { url, imageUrl, description } = result.value;
+          const { url, imageUrl, description, ticketUrl } = result.value;
           if (imageUrl) imageMap.set(url, imageUrl);
           if (description) descMap.set(url, description);
+          if (ticketUrl) detailTicketMap.set(url, ticketUrl);
         }
       }
 
-      // Apply images and descriptions to showtimes
+      // Apply images, descriptions, and ticket URLs to showtimes
+      // filmImageCache maps URL → film title from the schedule parsing
       for (const s of showtimes) {
-        // Find the matching film URL
-        for (const [url, img] of imageMap) {
-          const slug = url.split('/').pop() || '';
-          if (s.id.includes(slug.replace(/-/g, ''))) {
-            s.imageUrl = img;
+        for (const [url, filmTitle] of filmImageCache) {
+          // Match by film title (the showtime film may include a series suffix)
+          if (filmTitle && s.film.includes(filmTitle)) {
+            const img = imageMap.get(url);
+            if (img) s.imageUrl = img;
             const desc = descMap.get(url);
             if (desc) s.description = desc;
+            const detailTicket = detailTicketMap.get(url);
+            if (detailTicket) s.ticketUrl = detailTicket;
             break;
           }
         }
