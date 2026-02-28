@@ -101,7 +101,7 @@ export async function scrapeMetrograph(): Promise<Showtime[]> {
 
         $showtimesContainer.children().each((_, child) => {
           const $child = $(child);
-          const tagName = (child as cheerio.Element).tagName?.toLowerCase();
+          const tagName = (child as unknown as { tagName?: string }).tagName?.toLowerCase();
 
           // Date header: h5.sr-only or h6
           if ((tagName === 'h5' && $child.hasClass('sr-only')) || tagName === 'h6') {
